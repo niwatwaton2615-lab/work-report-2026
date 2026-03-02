@@ -98,11 +98,33 @@ def generate_word(u_info, filtered_df):
     # วนลูปใส่ข้อมูลงาน
     for _, r in filtered_df.iterrows():
         row_cells = table.add_row().cells
-        data_list = [format_thai_date(r['date']), r['task'], r['amount'], r['done'], r['pending'], r['edit'], r['duration'], r['remark']]
-        for i, val in enumerate(data_list):
+        
+        # เตรียมข้อมูลดิบ
+        raw_data = [
+            format_thai_date(r['date']), 
+            r['task'], 
+            r['amount'], 
+            r['done'], 
+            r['pending'], 
+            r['edit'], 
+            r['duration'], 
+            r['remark']
+        ]
+        
+        for i, val in enumerate(raw_data):
+            # 1. จัดการค่าว่าง (NaN, None, หรือสตริงว่าง)
+            if pd.isna(val) or val == "" or val is None:
+                display_val = "-"
+            # 2. จัดการตัวเลข (ลบทศนิยม)
+            elif isinstance(val, (int, float)):
+                display_val = str(int(val)) # แปลงเป็น int ก่อนเพื่อลบ .0 แล้วค่อยเป็นข้อความ
+            else:
+                display_val = str(val)
+
             p = row_cells[i].paragraphs[0]
+            # วันที่และตัวเลขให้จัดกลาง ส่วนงานที่ทำ (i=1) ให้ชิดซ้าย
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER if i != 1 else WD_ALIGN_PARAGRAPH.LEFT
-            set_font(p.add_run(str(val)), 14)
+            set_font(p.add_run(display_val), 14)
 
     # ท้ายกระดาษ
     footer = doc.sections[0].footer
@@ -206,6 +228,7 @@ else:
             st.success("บันทึกข้อมูลเรียบร้อยแล้ว!")
 
             st.balloons()
+
 
 
 
