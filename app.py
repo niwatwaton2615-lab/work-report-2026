@@ -71,8 +71,8 @@ def generate_word(u_info, filtered_df):
 
     # ข้อมูลพนักงาน (ตำแหน่งแบบยาว)
     info = doc.add_paragraph()
-    info.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    full_name = f"=ชื่อ {u_info.get('nametitle', ' ')}{u_info.get('name', '')}"
+    info.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    full_name = f"ชื่อ {u_info.get('nametitle', ' ')}{u_info.get('name', '')}"
     pos_text = (f"{full_name}\nตำแหน่ง ลูกจ้างเหมาบริการสนับสนุนการขับเคลื่อนงานนโยบายของรัฐบาลและ\n"
                 f"การให้บริการประชาชนในพื้นที่ (ดำเนินงานฝ่าย{u_info.get('position', '')})")
     run = info.add_run(pos_text)
@@ -206,6 +206,7 @@ else:
             st.success("บันทึกข้อมูลเรียบร้อยแล้ว!")
 
             st.balloons()
+
 
 
 
