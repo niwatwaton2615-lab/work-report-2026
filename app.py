@@ -11,31 +11,31 @@ from datetime import datetime
 # --- Configuration ---
 st.set_page_config(page_title="Work Report System 2026", layout="wide")
 
-# เชื่อมต่อ Google Sheets (ดึง URL จาก Secrets)
+# เชื่อมต่อ Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- Functions สำหรับจัดการข้อมูลบน Google Sheets ---
+# --- Functions จัดการข้อมูล (แก้ปัญหาข้อมูลหายด้วยการปิด Cache) ---
 def get_users():
-    try:
-        return conn.read(worksheet="users", ttl=0) # ttl=0 เพื่อให้อ่านข้อมูลสดใหม่เสมอ
-    except:
-        return pd.DataFrame(columns=['nametitle', 'name', 'position', 'password', 'username'])
+    # ttl=0 เพื่อให้อ่านข้อมูลสดใหม่จาก Google Sheet ทุกครั้ง
+    return conn.read(worksheet="users", ttl=0)
 
 def get_all_reports():
-    try:
-        return conn.read(worksheet="reports", ttl=0)
-    except:
-        return pd.DataFrame(columns=['username', 'date', 'task', 'amount', 'done', 'pending', 'edit', 'duration', 'remark'])
+    return conn.read(worksheet="reports", ttl=0)
 
 def save_user(new_user_df):
+    # ล้างแคชก่อนและหลังบันทึก เพื่อป้องกันการอ่านข้อมูลเก่ามาทับ
+    st.cache_data.clear()
     existing_users = get_users()
     updated_users = pd.concat([existing_users, new_user_df], ignore_index=True)
     conn.update(worksheet="users", data=updated_users)
+    st.cache_data.clear()
 
 def save_report(new_report_df):
+    st.cache_data.clear()
     existing_reports = get_all_reports()
     updated_reports = pd.concat([existing_reports, new_report_df], ignore_index=True)
     conn.update(worksheet="reports", data=updated_reports)
+    st.cache_data.clear()
 
 # --- ฟังก์ชันจัดการฟอนต์และวันที่ ---
 def set_font(run, size=16):
@@ -66,7 +66,7 @@ def generate_word(u_info, filtered_df):
 
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run(f"(ตัวอย่าง)\n(ร่าง) รายงานการทำงานจ้าง ประจำเดือน {current_month} พ.ศ. {current_year_be}")
+    run = title.add_run(f"รายงานการทำงานจ้าง ประจำเดือน {current_month} พ.ศ. {current_year_be}")
     run.bold = True
     set_font(run, 18)
 
@@ -82,14 +82,12 @@ def generate_word(u_info, filtered_df):
     headers = ['วัน เดือน ปี', 'งานที่ทำ', 'จำนวน\n(เรื่อง/ชิ้น)', 'ผลการดำเนินงาน', '', '', 'ระยะเวลา\nดำเนินงาน', 'หมายเหตุ']
     for i, h in enumerate(headers):
         p = table.rows[0].cells[i].paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(0); p.paragraph_format.space_after = Pt(0)
         run = p.add_run(h); run.bold = True; set_font(run, 14)
 
     table.rows[0].cells[3].merge(table.rows[0].cells[4]).merge(table.rows[0].cells[5])
     sub_headers = {3: 'เสร็จ', 4: 'ไม่เสร็จ', 5: 'ส่งแก้ไข'}
     for col_idx, text in sub_headers.items():
         p = table.rows[1].cells[col_idx].paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(0); p.paragraph_format.space_after = Pt(0)
         set_font(p.add_run(text), 14)
 
     for col in [0, 1, 2, 6, 7]:
@@ -102,12 +100,11 @@ def generate_word(u_info, filtered_df):
         for i, val in enumerate(data_list):
             p = row_cells[i].paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER if i != 1 else WD_ALIGN_PARAGRAPH.LEFT
-            p.paragraph_format.space_before = Pt(2); p.paragraph_format.space_after = Pt(2)
             set_font(p.add_run(str(val)), 14)
 
     footer = doc.sections[0].footer
     footer_para = footer.paragraphs[0]; footer_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    run = footer_para.add_run(f"(ลงชื่อ)............................................................ผู้รับจ้าง")
+    run = footer_para.add_run(f"(นาย/นาง/นางสาว)............................................................ผู้รับจ้าง")
     set_font(run, 16)
 
     bio = BytesIO(); doc.save(bio); return bio.getvalue()
@@ -115,8 +112,10 @@ def generate_word(u_info, filtered_df):
 # --- ระบบ Login / Register ---
 if "logged_in" not in st.session_state: st.session_state.logged_in = False
 
-# ตรวจสอบและสร้าง Admin อัตโนมัติใน Google Sheet
+# อ่านข้อมูล User ล่าสุดเสมอ
 users_df = get_users()
+
+# ตรวจสอบและสร้าง Admin อัตโนมัติ (ถ้ายังไม่มี)
 if users_df.empty or "admin" not in users_df['username'].values:
     admin_setup = pd.DataFrame([{"nametitle": "นาย", "name": "Administrator", "position": "บริหารทั่วไป", "password": "admin", "username": "admin"}])
     save_user(admin_setup)
@@ -148,17 +147,21 @@ if not st.session_state.logged_in:
             if nu in users_df['username'].values: st.error("Username นี้มีผู้ใช้แล้ว")
             else:
                 new_u = pd.DataFrame([{"nametitle": t, "name": nn, "position": npos, "password": np, "username": nu}])
-                save_user(new_u); st.success("สมัครสำเร็จ! กรุณาไปที่หน้า Login")
+                save_user(new_u)
+                st.success("สมัครสมาชิกสำเร็จ! กรุณาเข้าสู่ระบบ")
                 st.rerun()
 
 else:
-    # --- หน้าหลักหลัง Login ---
+    # --- หน้าหลักหลังจาก Login ---
     curr_u = st.session_state.username
     user = st.session_state.user_info
     
     with st.sidebar:
         st.write(f"ผู้ใช้งาน: {user['name']}")
-        if st.button("Logout"): st.session_state.logged_in = False; st.rerun()
+        if st.button("Logout"): 
+            st.session_state.logged_in = False
+            st.cache_data.clear()
+            st.rerun()
 
     if curr_u == "admin":
         st.title("👨‍💼 แผงควบคุม Admin")
@@ -183,7 +186,7 @@ else:
         init_data = pd.DataFrame({'วันที่': [datetime.now().date()], 'งานที่ทำ': [""], 'จำนวนรวม': [0], 'เสร็จ': [1], 'ไม่เสร็จ': [0], 'ส่งแก้ไข': [0], 'ระยะเวลา': ["1 วัน"], 'หมายเหตุ': [""]})
         ed_df = st.data_editor(init_data, num_rows="dynamic", use_container_width=True, column_config={"วันที่": st.column_config.DateColumn(format="DD/MM/YYYY")})
         
-        if st.button("🚀 บันทึกรายงานลง Google Sheets"):
+        if st.button("🚀 บันทึกรายงาน"):
             new_reps = []
             for _, r in ed_df.iterrows():
                 new_reps.append({
