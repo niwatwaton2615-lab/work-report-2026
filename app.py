@@ -14,21 +14,19 @@ st.set_page_config(page_title="Work Report System 2026", layout="wide")
 # เชื่อมต่อ Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- Functions จัดการข้อมูล (แก้ปัญหาข้อมูลหายด้วยการปิด Cache) ---
+# --- Functions จัดการข้อมูล (บังคับไม่อ่าน Cache เพื่อป้องกันข้อมูลหาย) ---
 def get_users():
-    # ttl=0 เพื่อให้อ่านข้อมูลสดใหม่จาก Google Sheet ทุกครั้ง
     return conn.read(worksheet="users", ttl=0)
 
 def get_all_reports():
     return conn.read(worksheet="reports", ttl=0)
 
 def save_user(new_user_df):
-    # ล้างแคชก่อนและหลังบันทึก เพื่อป้องกันการอ่านข้อมูลเก่ามาทับ
-    st.cache_data.clear()
+    st.cache_data.clear() # ล้างแคชก่อนอ่านข้อมูลเดิม
     existing_users = get_users()
     updated_users = pd.concat([existing_users, new_user_df], ignore_index=True)
     conn.update(worksheet="users", data=updated_users)
-    st.cache_data.clear()
+    st.cache_data.clear() # ล้างแคชหลังบันทึก
 
 def save_report(new_report_df):
     st.cache_data.clear()
@@ -52,7 +50,7 @@ def format_thai_date(date_str):
         return f"{int(day)} {thai_months_short[int(month)-1]} {year}"
     except: return date_str
 
-# --- ฟังก์ชันสร้างไฟล์ Word ---
+# --- ฟังก์ชันสร้างไฟล์ Word (ดึงข้อมูลจาก Google Sheet) ---
 def generate_word(u_info, filtered_df):
     doc = Document()
     thai_months_full = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
@@ -64,12 +62,14 @@ def generate_word(u_info, filtered_df):
         section.top_margin, section.bottom_margin = Inches(0.5), Inches(0.8)
         section.left_margin, section.right_margin = Inches(1.0), Inches(0.5)
 
+    # ส่วนหัวกระดาษ
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = title.add_run(f"รายงานการทำงานจ้าง ประจำเดือน {current_month} พ.ศ. {current_year_be}")
     run.bold = True
     set_font(run, 18)
 
+    # ข้อมูลพนักงาน (ตำแหน่งแบบยาว)
     info = doc.add_paragraph()
     info.alignment = WD_ALIGN_PARAGRAPH.CENTER
     full_name = f"{u_info.get('nametitle', '')}{u_info.get('name', '')}"
@@ -78,6 +78,7 @@ def generate_word(u_info, filtered_df):
     run = info.add_run(pos_text)
     set_font(run, 16)
 
+    # สร้างตาราง
     table = doc.add_table(rows=2, cols=8); table.style = 'Table Grid'
     headers = ['วัน เดือน ปี', 'งานที่ทำ', 'จำนวน\n(เรื่อง/ชิ้น)', 'ผลการดำเนินงาน', '', '', 'ระยะเวลา\nดำเนินงาน', 'หมายเหตุ']
     for i, h in enumerate(headers):
@@ -94,6 +95,7 @@ def generate_word(u_info, filtered_df):
         table.rows[0].cells[col].merge(table.rows[1].cells[col])
         table.rows[0].cells[col].vertical_alignment = 1
 
+    # วนลูปใส่ข้อมูลงาน
     for _, r in filtered_df.iterrows():
         row_cells = table.add_row().cells
         data_list = [format_thai_date(r['date']), r['task'], r['amount'], r['done'], r['pending'], r['edit'], r['duration'], r['remark']]
@@ -102,6 +104,7 @@ def generate_word(u_info, filtered_df):
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER if i != 1 else WD_ALIGN_PARAGRAPH.LEFT
             set_font(p.add_run(str(val)), 14)
 
+    # ท้ายกระดาษ
     footer = doc.sections[0].footer
     footer_para = footer.paragraphs[0]; footer_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
     run = footer_para.add_run(f"(นาย/นาง/นางสาว)............................................................ผู้รับจ้าง")
@@ -112,10 +115,9 @@ def generate_word(u_info, filtered_df):
 # --- ระบบ Login / Register ---
 if "logged_in" not in st.session_state: st.session_state.logged_in = False
 
-# อ่านข้อมูล User ล่าสุดเสมอ
 users_df = get_users()
 
-# ตรวจสอบและสร้าง Admin อัตโนมัติ (ถ้ายังไม่มี)
+# สร้าง Admin อัตโนมัติใน Sheet ถ้ายังไม่มี
 if users_df.empty or "admin" not in users_df['username'].values:
     admin_setup = pd.DataFrame([{"nametitle": "นาย", "name": "Administrator", "position": "บริหารทั่วไป", "password": "admin", "username": "admin"}])
     save_user(admin_setup)
@@ -152,7 +154,7 @@ if not st.session_state.logged_in:
                 st.rerun()
 
 else:
-    # --- หน้าหลักหลังจาก Login ---
+    # --- หน้าหลักหลัง Login ---
     curr_u = st.session_state.username
     user = st.session_state.user_info
     
@@ -163,24 +165,29 @@ else:
             st.cache_data.clear()
             st.rerun()
 
+    # --- ส่วน Admin: สร้างไฟล์ Word ---
     if curr_u == "admin":
-        st.title("👨‍💼 แผงควบคุม Admin")
+        st.title("👨‍💼 แผงควบคุม Admin (สร้างไฟล์รายงาน)")
         all_rep_df = get_all_reports()
         staff_list = users_df[users_df['username'] != 'admin']['username'].tolist()
         
         if staff_list:
             target = st.selectbox("เลือกพนักงาน", staff_list)
             df_target = all_rep_df[all_rep_df['username'] == target].copy()
+            
             if not df_target.empty:
                 df_target['dt'] = pd.to_datetime(df_target['date'], format='%d/%m/%Y')
                 dr = st.date_input("เลือกช่วงวันที่", value=(df_target['dt'].min().date(), df_target['dt'].max().date()))
-                if st.button("📥 ดาวน์โหลดไฟล์ Word"):
+                
+                if st.button("📥 สร้างไฟล์และดาวน์โหลด Word"):
                     mask = (df_target['dt'].dt.date >= dr[0]) & (df_target['dt'].dt.date <= dr[1])
                     t_info = users_df[users_df['username'] == target].iloc[0].to_dict()
-                    st.download_button(f"Download Report: {target}", generate_word(t_info, df_target.loc[mask]), f"Report_{target}.docx")
+                    word_data = generate_word(t_info, df_target.loc[mask].sort_values('dt'))
+                    st.download_button(f"โหลดไฟล์ {target}", word_data, f"Report_{target}.docx")
             else: st.info("พนักงานคนนี้ยังไม่มีการบันทึกงาน")
-        else: st.info("ยังไม่มีพนักงานสมัครสมาชิก")
+        else: st.info("ยังไม่มีสมาชิกในระบบ")
 
+    # --- ส่วน User: บันทึกรายงาน ---
     else:
         st.title("📝 บันทึกงานประจำวัน")
         init_data = pd.DataFrame({'วันที่': [datetime.now().date()], 'งานที่ทำ': [""], 'จำนวนรวม': [0], 'เสร็จ': [1], 'ไม่เสร็จ': [0], 'ส่งแก้ไข': [0], 'ระยะเวลา': ["1 วัน"], 'หมายเหตุ': [""]})
@@ -192,13 +199,8 @@ else:
                 new_reps.append({
                     "username": curr_u,
                     "date": r['วันที่'].strftime("%d/%m/%Y"),
-                    "task": r['งานที่ทำ'],
-                    "amount": r['จำนวนรวม'],
-                    "done": r['เสร็จ'],
-                    "pending": r['ไม่เสร็จ'],
-                    "edit": r['ส่งแก้ไข'],
-                    "duration": r['ระยะเวลา'],
-                    "remark": r['หมายเหตุ']
+                    "task": r['งานที่ทำ'], "amount": r['จำนวนรวม'], "done": r['เสร็จ'], 
+                    "pending": r['ไม่เสร็จ'], "edit": r['ส่งแก้ไข'], "duration": r['ระยะเวลา'], "remark": r['หมายเหตุ']
                 })
             save_report(pd.DataFrame(new_reps))
             st.success("บันทึกข้อมูลเรียบร้อยแล้ว!")
