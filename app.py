@@ -7,6 +7,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from io import BytesIO
 from datetime import datetime
+import time
 
 # --- Configuration ---
 st.set_page_config(page_title="Work Report System 2026", layout="wide")
@@ -14,19 +15,29 @@ st.set_page_config(page_title="Work Report System 2026", layout="wide")
 # เชื่อมต่อ Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- Functions จัดการข้อมูล (บังคับไม่อ่าน Cache เพื่อป้องกันข้อมูลหาย) ---
+# --- Functions จัดการข้อมูล (แก้ปัญหาข้อมูลหาย + API Error) ---
 def get_users():
-    return conn.read(worksheet="users", ttl=0)
+    try:
+        return conn.read(worksheet="users", ttl=0)
+    except Exception:
+        time.sleep(1) # ถ้า API ติดขัดให้รอ 1 วินาทีแล้วลองใหม่
+        try:
+            return conn.read(worksheet="users", ttl=0)
+        except:
+            return pd.DataFrame(columns=['nametitle', 'name', 'position', 'password', 'username'])
 
 def get_all_reports():
-    return conn.read(worksheet="reports", ttl=0)
+    try:
+        return conn.read(worksheet="reports", ttl=0)
+    except Exception:
+        return pd.DataFrame(columns=['username', 'date', 'task', 'amount', 'done', 'pending', 'edit', 'duration', 'remark'])
 
 def save_user(new_user_df):
-    st.cache_data.clear() # ล้างแคชก่อนอ่านข้อมูลเดิม
+    st.cache_data.clear()
     existing_users = get_users()
     updated_users = pd.concat([existing_users, new_user_df], ignore_index=True)
     conn.update(worksheet="users", data=updated_users)
-    st.cache_data.clear() # ล้างแคชหลังบันทึก
+    st.cache_data.clear()
 
 def save_report(new_report_df):
     st.cache_data.clear()
@@ -50,103 +61,64 @@ def format_thai_date(date_str):
         return f"{int(day)} {thai_months_short[int(month)-1]} {year}"
     except: return date_str
 
-# --- ฟังก์ชันสร้างไฟล์ Word (ดึงข้อมูลจาก Google Sheet) ---
+# --- ฟังก์ชันสร้างไฟล์ Word จาก Template ---
 def generate_word(u_info, filtered_df):
-    doc = Document()
+    try:
+        doc = Document('template.docx')
+    except:
+        doc = Document()
+        doc.add_paragraph("ไม่พบไฟล์ template.docx ในระบบ")
+
+    # 1. แทนที่ข้อความหัวข้อ (Placeholder Replacement)
     thai_months_full = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
-    now = datetime.now()
-    current_month = thai_months_full[now.month - 1]
-    current_year_be = now.year + 543
+    current_month = thai_months_full[datetime.now().month - 1]
+    
+    replacements = {
+        "{{FULL_NAME}}": f"{u_info.get('nametitle', '')}{u_info.get('name', '')}",
+        "{{POSITION}}": u_info.get('position', ''),
+        "{{MONTH}}": current_month
+    }
 
-    for section in doc.sections:
-        section.top_margin, section.bottom_margin = Inches(0.5), Inches(0.8)
-        section.left_margin, section.right_margin = Inches(1.0), Inches(0.5)
+    for p in doc.paragraphs:
+        for placeholder, text in replacements.items():
+            if placeholder in p.text:
+                for run in p.runs:
+                    if placeholder in run.text:
+                        run.text = run.text.replace(placeholder, text)
 
-    # ส่วนหัวกระดาษ
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run(f"รายงานการทำงานจ้าง ประจำเดือน {current_month} พ.ศ. {current_year_be}")
-    run.bold = True
-    set_font(run, 18)
+    # 2. เติมข้อมูลลงในตาราง (จัดการค่าว่างและตัวเลขไม่มีทศนิยม)
+    if doc.tables:
+        table = doc.tables[0]
+        for _, r in filtered_df.iterrows():
+            row_cells = table.add_row().cells
+            raw_data = [
+                format_thai_date(r['date']), r['task'], r['amount'], 
+                r['done'], r['pending'], r['edit'], r['duration'], r['remark']
+            ]
+            for i, val in enumerate(raw_data):
+                # เช็กค่าว่างเป็น - และเช็กตัวเลขลบทศนิยม
+                if pd.isna(val) or val == "" or val is None:
+                    display_val = "-"
+                elif isinstance(val, (int, float)):
+                    display_val = str(int(val))
+                else:
+                    display_val = str(val)
 
-    # ข้อมูลพนักงาน (ตำแหน่งแบบยาว)
-    info = doc.add_paragraph()
-    info.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    full_name = f"ชื่อ {u_info.get('nametitle', ' ')}{u_info.get('name', '')}"
-    pos_text = (f"{full_name}\nตำแหน่ง ลูกจ้างเหมาบริการสนับสนุนการขับเคลื่อนงานนโยบายของรัฐบาลและ\n"
-                f"การให้บริการประชาชนในพื้นที่ (ดำเนินงานฝ่าย{u_info.get('position', '')})")
-    run = info.add_run(pos_text)
-    set_font(run, 16)
+                p = row_cells[i].paragraphs[0]
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER if i != 1 else WD_ALIGN_PARAGRAPH.LEFT
+                set_font(p.add_run(display_val), 14)
 
-    # สร้างตาราง
-    table = doc.add_table(rows=2, cols=8); table.style = 'Table Grid'
-    headers = ['วัน เดือน ปี', 'งานที่ทำ', 'จำนวน\n(เรื่อง/ชิ้น)', 'ผลการดำเนินงาน', '', '', 'ระยะเวลา\nดำเนินงาน', 'หมายเหตุ']
-    for i, h in enumerate(headers):
-        p = table.rows[0].cells[i].paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = p.add_run(h); run.bold = True; set_font(run, 14)
+    bio = BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
 
-    table.rows[0].cells[3].merge(table.rows[0].cells[4]).merge(table.rows[0].cells[5])
-    sub_headers = {3: 'เสร็จ', 4: 'ไม่เสร็จ', 5: 'ส่งแก้ไข'}
-    for col_idx, text in sub_headers.items():
-        p = table.rows[1].cells[col_idx].paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        set_font(p.add_run(text), 14)
-
-    for col in [0, 1, 2, 6, 7]:
-        table.rows[0].cells[col].merge(table.rows[1].cells[col])
-        table.rows[0].cells[col].vertical_alignment = 1
-
-    # วนลูปใส่ข้อมูลงาน
-    for _, r in filtered_df.iterrows():
-        row_cells = table.add_row().cells
-        
-        # เตรียมข้อมูลดิบ
-        raw_data = [
-            format_thai_date(r['date']), 
-            r['task'], 
-            r['amount'], 
-            r['done'], 
-            r['pending'], 
-            r['edit'], 
-            r['duration'], 
-            r['remark']
-        ]
-        
-        for i, val in enumerate(raw_data):
-            # 1. จัดการค่าว่าง (NaN, None, หรือสตริงว่าง)
-            if pd.isna(val) or val == "" or val is None:
-                display_val = "-"
-            # 2. จัดการตัวเลข (ลบทศนิยม)
-            elif isinstance(val, (int, float)):
-                display_val = str(int(val)) # แปลงเป็น int ก่อนเพื่อลบ .0 แล้วค่อยเป็นข้อความ
-            else:
-                display_val = str(val)
-
-            p = row_cells[i].paragraphs[0]
-            # วันที่และตัวเลขให้จัดกลาง ส่วนงานที่ทำ (i=1) ให้ชิดซ้าย
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER if i != 1 else WD_ALIGN_PARAGRAPH.LEFT
-            set_font(p.add_run(display_val), 14)
-
-    # ท้ายกระดาษ
-    footer = doc.sections[0].footer
-    footer_para = footer.paragraphs[0]; footer_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    run = footer_para.add_run(f"(นาย/นาง/นางสาว)............................................................ผู้รับจ้าง")
-    set_font(run, 16)
-
-    bio = BytesIO(); doc.save(bio); return bio.getvalue()
-
-# --- ระบบ Login / Register ---
+# --- UI Logic ---
 if "logged_in" not in st.session_state: st.session_state.logged_in = False
 
 users_df = get_users()
 
-# สร้าง Admin อัตโนมัติใน Sheet ถ้ายังไม่มี
-if users_df.empty or "admin" not in users_df['username'].values:
-    admin_setup = pd.DataFrame([{"nametitle": "นาย", "name": "Administrator", "position": "บริหารทั่วไป", "password": "admin", "username": "admin"}])
-    save_user(admin_setup)
-    st.rerun()
-
 if not st.session_state.logged_in:
-    st.title("📱 ระบบรายงานการจ้างเหมา (Google Sheets)")
+    st.title("📱 ระบบรายงานการจ้างเหมา (Template Version)")
     tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])
     
     with tab1:
@@ -159,78 +131,65 @@ if not st.session_state.logged_in:
                 st.session_state.username = u_in
                 st.session_state.user_info = u_match.iloc[0].to_dict()
                 st.rerun()
-            else: st.error("Username หรือ Password ไม่ถูกต้อง")
+            else: st.error("ข้อมูลไม่ถูกต้อง")
 
     with tab2:
-        t = st.selectbox("คำนำหน้าชื่อ", ["นาย", "นาง", "นางสาว"], key="reg_t")
-        nu = st.text_input("Username", key="reg_u")
-        nn = st.text_input("ชื่อ-สกุล", key="reg_n")
-        np = st.text_input("Password", type="password", key="reg_p")
-        npos = st.text_input("ฝ่าย", key="reg_pos")
+        t = st.selectbox("คำนำหน้า", ["นาย", "นาง", "นางสาว"])
+        nu = st.text_input("Username (ภาษาอังกฤษ)")
+        nn = st.text_input("ชื่อ-นามสกุล")
+        np = st.text_input("Password")
+        npos = st.text_input("ฝ่าย/ตำแหน่ง")
         if st.button("สมัครสมาชิก"):
-            if nu in users_df['username'].values: st.error("Username นี้มีผู้ใช้แล้ว")
+            if nu in users_df['username'].values: st.error("มีผู้ใช้นี้แล้ว")
             else:
-                new_u = pd.DataFrame([{"nametitle": t, "name": nn, "position": npos, "password": np, "username": nu}])
-                save_user(new_u)
-                st.success("สมัครสมาชิกสำเร็จ! กรุณาเข้าสู่ระบบ")
+                save_user(pd.DataFrame([{"nametitle": t, "name": nn, "position": npos, "password": np, "username": nu}]))
+                st.success("สำเร็จ! กรุณา Login")
                 st.rerun()
 
 else:
-    # --- หน้าหลักหลัง Login ---
     curr_u = st.session_state.username
     user = st.session_state.user_info
     
     with st.sidebar:
-        st.write(f"ผู้ใช้งาน: {user['name']}")
+        st.write(f"สวัสดี: {user['name']}")
         if st.button("Logout"): 
             st.session_state.logged_in = False
             st.cache_data.clear()
             st.rerun()
 
-    # --- ส่วน Admin: สร้างไฟล์ Word ---
     if curr_u == "admin":
-        st.title("👨‍💼 แผงควบคุม Admin (สร้างไฟล์รายงาน)")
+        st.title("👨‍💼 Admin Dashboard")
         all_rep_df = get_all_reports()
         staff_list = users_df[users_df['username'] != 'admin']['username'].tolist()
         
         if staff_list:
-            target = st.selectbox("เลือกพนักงาน", staff_list)
+            target = st.selectbox("เลือกรายชื่อพนักงาน", staff_list)
             df_target = all_rep_df[all_rep_df['username'] == target].copy()
             
             if not df_target.empty:
                 df_target['dt'] = pd.to_datetime(df_target['date'], format='%d/%m/%Y')
-                dr = st.date_input("เลือกช่วงวันที่", value=(df_target['dt'].min().date(), df_target['dt'].max().date()))
+                dr = st.date_input("ช่วงวันที่", value=(df_target['dt'].min().date(), df_target['dt'].max().date()))
                 
-                if st.button("📥 สร้างไฟล์และดาวน์โหลด Word"):
+                if st.button("📥 สร้างรายงานจาก Template"):
                     mask = (df_target['dt'].dt.date >= dr[0]) & (df_target['dt'].dt.date <= dr[1])
                     t_info = users_df[users_df['username'] == target].iloc[0].to_dict()
                     word_data = generate_word(t_info, df_target.loc[mask].sort_values('dt'))
-                    st.download_button(f"โหลดไฟล์ {target}", word_data, f"Report_{target}.docx")
-            else: st.info("พนักงานคนนี้ยังไม่มีการบันทึกงาน")
-        else: st.info("ยังไม่มีสมาชิกในระบบ")
-
-    # --- ส่วน User: บันทึกรายงาน ---
+                    st.download_button(f"Download_Report_{target}.docx", word_data, f"Report_{target}.docx")
+            else: st.info("ยังไม่มีข้อมูลงาน")
+    
     else:
         st.title("📝 บันทึกงานประจำวัน")
         init_data = pd.DataFrame({'วันที่': [datetime.now().date()], 'งานที่ทำ': [""], 'จำนวนรวม': [0], 'เสร็จ': [1], 'ไม่เสร็จ': [0], 'ส่งแก้ไข': [0], 'ระยะเวลา': ["1 วัน"], 'หมายเหตุ': [""]})
         ed_df = st.data_editor(init_data, num_rows="dynamic", use_container_width=True, column_config={"วันที่": st.column_config.DateColumn(format="DD/MM/YYYY")})
         
-        if st.button("🚀 บันทึกรายงาน"):
+        if st.button("🚀 บันทึกข้อมูล"):
             new_reps = []
             for _, r in ed_df.iterrows():
                 new_reps.append({
-                    "username": curr_u,
-                    "date": r['วันที่'].strftime("%d/%m/%Y"),
+                    "username": curr_u, "date": r['วันที่'].strftime("%d/%m/%Y"),
                     "task": r['งานที่ทำ'], "amount": r['จำนวนรวม'], "done": r['เสร็จ'], 
                     "pending": r['ไม่เสร็จ'], "edit": r['ส่งแก้ไข'], "duration": r['ระยะเวลา'], "remark": r['หมายเหตุ']
                 })
             save_report(pd.DataFrame(new_reps))
-            st.success("บันทึกข้อมูลเรียบร้อยแล้ว!")
-
+            st.success("บันทึกสำเร็จ!")
             st.balloons()
-
-
-
-
-
-
